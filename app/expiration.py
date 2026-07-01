@@ -23,7 +23,6 @@ import logging
 from datetime import date, timedelta
 from typing import Optional
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.models import InventoryItem, InventoryPayload, ReceiptItem, ReceiptPayload
 
@@ -33,13 +32,6 @@ from app.models import InventoryItem, InventoryPayload, ReceiptItem, ReceiptPayl
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM Configuration (Fallback Only)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_MODEL_NAME  = "gemini-1.5-pro"
-_TEMPERATURE = 0.0   # Must be deterministic — we parse the response as int
-_MAX_RETRIES = 2
 _DEFAULT_SHELF_LIFE_DAYS = 7   # Conservative safe-default when all lookups fail
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,9 +169,10 @@ SHELF_LIFE_DB: dict[str, int] = {
     "turnips":                14,
     "radishes":               14,
     "ginger":                 21,
-    "garlic":                 30,
-    "onion":                  30,
-    "red onion":              30,
+    "garlic":                 120,
+    "onion":                  60,
+    "onions":                 60,
+    "red onion":              60,
     "shallots":               30,
     "leeks":                  14,
     "scallions":              7,
@@ -327,76 +320,13 @@ def _local_shelf_life(item_name: str) -> Optional[int]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LLM Fallback Helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _llm_shelf_life(item_name: str) -> int:
-    """
-    Atomic fallback: ask Gemini for the refrigerated shelf-life of an unknown item.
-
-    Uses the most terse possible prompt to minimise token cost and avoid
-    the LLM adding prose around the numeric answer.
-
-    Args:
-        item_name: Item not found in the local knowledge base.
-
-    Returns:
-        Parsed integer shelf-life in days.
-        Falls back to ``_DEFAULT_SHELF_LIFE_DAYS`` if the response is
-        non-numeric or the API call fails.
-    """
-    prompt = (
-        f"Provide only an integer representing the typical refrigerated shelf life "
-        f"in days for {item_name}. "
-        f"Do not reply with text or units, return only the raw number."
-    )
-
-    logger.info("LLM fallback shelf-life lookup | item='%s'", item_name)
-
-    try:
-        llm = ChatGoogleGenerativeAI(
-            model=_MODEL_NAME,
-            temperature=_TEMPERATURE,
-            max_retries=_MAX_RETRIES,
-        )
-        response = await llm.ainvoke(prompt)
-        raw: str = response.content.strip()
-
-        # Parse — strip any accidental unit suffix the model may include
-        # (e.g., "7 days" → "7", "~10" → "10")
-        numeric_part = "".join(ch for ch in raw.split()[0] if ch.isdigit())
-        if not numeric_part:
-            raise ValueError(f"Non-numeric LLM response: {raw!r}")
-
-        days = int(numeric_part)
-        if days <= 0:
-            raise ValueError(f"LLM returned non-positive shelf life: {days}")
-
-        logger.info("LLM shelf-life resolved | item='%s' → %d days", item_name, days)
-        return days
-
-    except Exception as exc:
-        logger.warning(
-            "LLM shelf-life lookup failed for '%s' — using default %d days | error=%s",
-            item_name,
-            _DEFAULT_SHELF_LIFE_DAYS,
-            exc,
-        )
-        return _DEFAULT_SHELF_LIFE_DAYS
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-Item Enrichment
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def _enrich_item(item: ReceiptItem) -> InventoryItem:
     """
     Resolve the shelf-life for a single ReceiptItem and produce an InventoryItem.
 
     Resolution order:
-      1. Local DB hit  → zero network cost
-      2. LLM fallback  → one atomic Gemini call
-      3. Safe default  → _DEFAULT_SHELF_LIFE_DAYS if both fail
+      1. Local DB hit  → zero network cost (milliseconds)
+      2. Safe default  → _DEFAULT_SHELF_LIFE_DAYS if it fails
 
     Args:
         item: A validated ReceiptItem from the parsed receipt.
@@ -405,13 +335,13 @@ async def _enrich_item(item: ReceiptItem) -> InventoryItem:
         InventoryItem with expiration_date populated.
     """
     # ── Step 1: Local lookup ──────────────────────────────────────────────────
-    shelf_life: Optional[int] = _local_shelf_life(item.item_name)
+    shelf_life = _local_shelf_life(item.item_name)
     source = "local_db"
 
-    # ── Step 2: LLM fallback ─────────────────────────────────────────────────
+    # ── Step 2: Fallback ──────────────────────────────────────────────────────
     if shelf_life is None:
-        shelf_life = await _llm_shelf_life(item.item_name)
-        source = "llm_fallback"
+        shelf_life = _DEFAULT_SHELF_LIFE_DAYS
+        source = "default_fallback"
 
     logger.debug(
         "Shelf life resolved | item='%s' | days=%d | source=%s",

@@ -307,6 +307,14 @@ class Recipe(BaseModel):
         examples=["Lemon Herb Roasted Chicken", "Classic Margherita Pizza"],
     )
 
+    difficulty_level: str = Field(
+        ...,
+        description=(
+            "The difficulty level of the recipe, such as 'Easy', 'Medium', or 'Hard'."
+        ),
+        examples=["Easy", "Medium", "Hard"],
+    )
+
     ingredients: list[IngredientRequirement] = Field(
         ...,
         description=(

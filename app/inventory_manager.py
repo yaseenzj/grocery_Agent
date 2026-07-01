@@ -47,9 +47,11 @@ from app.models import InventoryItem, InventoryPayload
 logger = logging.getLogger(__name__)
 
 _INVENTORY_PATH = Path(__file__).parent.parent / "data" / "inventory.json"
-_MODEL_NAME     = "gemini-1.5-pro"
+_MODEL_NAME     = "gemini-3.5-flash" 
+_FALLBACK_1     = "gemini-2.5-flash"
+_FALLBACK_2     = "gemini-1.5-flash"
 _TEMPERATURE    = 0.0
-_MAX_RETRIES    = 2
+_MAX_RETRIES    = 5
 
 # Asyncio lock — prevents concurrent coroutines from racing on the JSON file.
 # Module-level so it is shared across all requests in the same process.
@@ -306,12 +308,15 @@ async def _extract_consumption_event(raw_user_speech: str) -> _ConsumptionEvent:
         RuntimeError: If the LLM fails or returns an unparseable response.
     """
     try:
-        llm = ChatGoogleGenerativeAI(
-            model=_MODEL_NAME,
-            temperature=_TEMPERATURE,
-            max_retries=_MAX_RETRIES,
-        )
-        structured_llm = llm.with_structured_output(_ConsumptionEvent)
+        primary = ChatGoogleGenerativeAI(model=_MODEL_NAME, temperature=_TEMPERATURE, max_retries=_MAX_RETRIES)
+        fb1 = ChatGoogleGenerativeAI(model=_FALLBACK_1, temperature=_TEMPERATURE, max_retries=_MAX_RETRIES)
+        fb2 = ChatGoogleGenerativeAI(model=_FALLBACK_2, temperature=_TEMPERATURE, max_retries=_MAX_RETRIES)
+        
+        primary_chain = primary.with_structured_output(_ConsumptionEvent)
+        fb1_chain = fb1.with_structured_output(_ConsumptionEvent)
+        fb2_chain = fb2.with_structured_output(_ConsumptionEvent)
+        
+        structured_llm = primary_chain.with_fallbacks([fb1_chain, fb2_chain])
 
         messages = [
             SystemMessage(content=_CONSUMPTION_SYSTEM_PROMPT),
@@ -558,3 +563,27 @@ async def get_current_inventory() -> InventoryPayload:
     """
     async with _FILE_LOCK:
         return await _load_inventory()
+
+async def remove_inventory_item(item_name: str) -> InventoryPayload:
+    """
+    Hard-delete all batches of a specific item from the inventory.
+
+    Args:
+        item_name: The exact name of the item to purge.
+
+    Returns:
+        The updated InventoryPayload.
+    """
+    async with _FILE_LOCK:
+        inventory = await _load_inventory()
+        
+        original_count = len(inventory.items)
+        inventory.items = [it for it in inventory.items if it.item_name.lower() != item_name.lower()]
+        
+        if len(inventory.items) < original_count:
+            await _save_inventory(inventory)
+            logger.info("Purged all batches of item '%s'", item_name)
+        else:
+            logger.warning("Attempted to purge item '%s', but it was not found.", item_name)
+            
+        return inventory

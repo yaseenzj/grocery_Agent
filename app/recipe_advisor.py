@@ -24,7 +24,9 @@ Pipeline position:
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -40,10 +42,14 @@ from app.models import InventoryItem, InventoryPayload, Recipe
 
 logger = logging.getLogger(__name__)
 
-_MODEL_NAME  = "gemini-1.5-pro"
-_TEMPERATURE = 0.0   # Deterministic — recipes must be schema-compliant
-_MAX_RETRIES = 2
-_RECIPE_COUNT = 3    # Number of recipes to request from the LLM
+_RECIPE_PATH = Path(__file__).parent.parent / "data" / "recipes.json"
+
+_MODEL_NAME  = "gemini-3.5-flash"  
+_FALLBACK_1  = "gemini-2.5-flash"
+_FALLBACK_2  = "gemini-1.5-flash"
+_TEMPERATURE = 0.0   
+_MAX_RETRIES = 5
+_RECIPE_COUNT = 3    
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,9 +94,7 @@ Strict Composition Constraints:
 the provided list, as they expire first and must be consumed before going to waste. \
 Recipes that use more top-ranked ingredients are preferred over those that skip them.
 
-2. Stock Constraints: Never suggest recipes that require core ingredients \
-currently out of stock or missing from the inventory list. \
-Only use what is explicitly listed as available.
+2. Stock Constraints (CRITICAL): NEVER include core ingredients, meats, vegetables, or fruits that are NOT in the provided inventory list. You are strictly limited to the ingredients provided. If you cannot make a full recipe without adding a major missing ingredient, make a simpler recipe instead.
 
 3. Complementary Ingredients: If a recipe needs basic complementary components \
 not present in the inventory list (e.g., olive oil, salt, pepper, spices, flour), \
@@ -100,6 +104,7 @@ Do not silently assume pantry staples are available.
 
 4. Recipe Quality: Each recipe must be complete and realistic:
    - `recipe_name`: descriptive and human-readable.
+   - `difficulty_level`: string indicating level of cooking (e.g., 'Easy', 'Medium', 'Hard').
    - `ingredients`: full list with quantities and units.
    - `steps`: ordered, atomic cooking instructions (minimum 4 steps).
    - `source`: a valid HTTP/HTTPS URL to a reputable cooking reference.
@@ -316,15 +321,15 @@ async def recommend_optimized_meals() -> list[Recipe]:
 
     # ── Step 4 (cont.): Build LangChain chain with structured output ──────────
     try:
-        llm = ChatGoogleGenerativeAI(
-            model=_MODEL_NAME,
-            temperature=_TEMPERATURE,
-            max_retries=_MAX_RETRIES,
-        )
-        # Bind _MealRecommendationPayload (not list[Recipe]) as the schema target.
-        # This produces a stable JSON Schema anchor compatible with Gemini's
-        # function-calling interface across all LangChain versions.
-        structured_llm = llm.with_structured_output(_MealRecommendationPayload)
+        primary = ChatGoogleGenerativeAI(model=_MODEL_NAME, temperature=_TEMPERATURE, max_retries=_MAX_RETRIES)
+        fb1 = ChatGoogleGenerativeAI(model=_FALLBACK_1, temperature=_TEMPERATURE, max_retries=_MAX_RETRIES)
+        fb2 = ChatGoogleGenerativeAI(model=_FALLBACK_2, temperature=_TEMPERATURE, max_retries=_MAX_RETRIES)
+        
+        primary_chain = primary.with_structured_output(_MealRecommendationPayload)
+        fb1_chain = fb1.with_structured_output(_MealRecommendationPayload)
+        fb2_chain = fb2.with_structured_output(_MealRecommendationPayload)
+        
+        structured_llm = primary_chain.with_fallbacks([fb1_chain, fb2_chain])
 
     except Exception as exc:
         logger.error(
@@ -394,3 +399,41 @@ async def recommend_optimized_meals() -> list[Recipe]:
     )
 
     return ranked_recipes
+
+
+async def precompute_and_cache_recipes() -> None:
+    """
+    Background worker: generate recommendations and save them to disk.
+    This runs asynchronously to avoid blocking the user's upload or consume actions.
+    """
+    logger.info("Background recipe precomputation started.")
+    try:
+        recipes = await recommend_optimized_meals()
+        
+        # Save to cache
+        payload = [r.model_dump() for r in recipes]
+        
+        # Atomic write
+        tmp_path = _RECIPE_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path.replace(_RECIPE_PATH)
+        
+        logger.info("Background recipe precomputation complete. Cached %d recipes.", len(recipes))
+    except Exception as exc:
+        logger.error("Background recipe precomputation failed | error=%s", exc, exc_info=True)
+
+
+async def read_cached_recipes() -> list[Recipe]:
+    """
+    Instantly returns the cached recipes without hitting the LLM.
+    """
+    if not _RECIPE_PATH.exists():
+        return []
+        
+    try:
+        content = _RECIPE_PATH.read_text(encoding="utf-8")
+        data = json.loads(content)
+        return [Recipe.model_validate(r) for r in data]
+    except Exception as exc:
+        logger.error("Failed to read cached recipes | error=%s", exc)
+        return []

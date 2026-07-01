@@ -35,16 +35,18 @@ from datetime import date
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from app.expiration import enrich_inventory_lifespans
-from app.inventory_manager import process_consumption_event, update_inventory_stock
+from app.inventory_manager import process_consumption_event, update_inventory_stock, remove_inventory_item
 from app.models import InventoryPayload, Recipe
-from app.parser import parse_receipt_text
-from app.recipe_advisor import recommend_optimized_meals
+from app.parser import parse_receipt_text, parse_receipt_text_local
+from app.recipe_advisor import recommend_optimized_meals, precompute_and_cache_recipes, read_cached_recipes
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +114,18 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=_lifespan,
+)
+
+# Add CORS middleware so Framer (or any frontend) can call this API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allows all headers
 )
 
 logger = logging.getLogger(__name__)
@@ -322,26 +336,26 @@ async def runtime_error_handler(
     ),
     tags=["Receipt"],
 )
-async def upload_receipt(body: ReceiptUploadRequest) -> InventoryPayload:
+async def upload_receipt(
+    body: ReceiptUploadRequest,
+    background_tasks: BackgroundTasks,
+) -> InventoryPayload:
     """
     Full receipt ingestion pipeline in a single endpoint.
 
     Pipeline steps executed synchronously (each awaited in order):
-      1. ``parse_receipt_text``        — NL receipt → ReceiptPayload
+      1. ``parse_receipt_text_local``  — Fast local regex parsing -> ReceiptPayload
       2. ``enrich_inventory_lifespans``— ReceiptPayload → InventoryPayload (+ expiration dates)
       3. ``update_inventory_stock``    — Merges into data/inventory.json, returns merged state
+      4. Silently schedules recipe precomputation in background tasks.
 
     Args:
         body: Validated :class:`ReceiptUploadRequest` with ``receipt_text``
               and optional ``today_date`` fallback.
+        background_tasks: FastAPI BackgroundTasks system.
 
     Returns:
         The merged :class:`~app.models.InventoryPayload` as now persisted on disk.
-
-    Raises:
-        HTTP 422: If ``receipt_text`` is empty or ``today_date`` is malformed.
-        HTTP 502: If the Gemini API call or disk write fails.
-        HTTP 500: If the LLM returns a response that fails schema validation.
     """
     logger.info(
         "POST /receipt/upload | date=%s | input_chars=%d",
@@ -349,25 +363,30 @@ async def upload_receipt(body: ReceiptUploadRequest) -> InventoryPayload:
         len(body.receipt_text),
     )
 
-    # Stage 1 — Parse raw receipt text into structured ReceiptPayload
-    receipt_payload = await parse_receipt_text(
+    # Stage 1 — Parse raw receipt text locally into structured ReceiptPayload
+    receipt_payload = parse_receipt_text_local(
         receipt_text=body.receipt_text,
         today_date=body.today_date,
     )
-    logger.info("Stage 1 complete | items_parsed=%d", len(receipt_payload.items))
+    logger.info("Stage 1 complete (local parsing) | items_parsed=%d", len(receipt_payload.items))
 
     # Stage 2 — Enrich each item with a computed expiration_date
     inventory_payload = await enrich_inventory_lifespans(receipt=receipt_payload)
     logger.info("Stage 2 complete | items_enriched=%d", len(inventory_payload.items))
 
-    # Stage 3 — Merge into the persistent inventory store and return
+    # Stage 3 — Merge into the persistent inventory store
     updated_inventory = await update_inventory_stock(incoming_stock=inventory_payload)
     logger.info(
         "POST /receipt/upload complete | total_inventory_items=%d",
         len(updated_inventory.items),
     )
 
+    # Stage 4 — Trigger recipe precomputation in the background
+    background_tasks.add_task(precompute_and_cache_recipes)
+    logger.info("Stage 4 complete | scheduled background recipe precomputation")
+
     return updated_inventory
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -388,7 +407,10 @@ async def upload_receipt(body: ReceiptUploadRequest) -> InventoryPayload:
     ),
     tags=["Inventory"],
 )
-async def consume_inventory(body: ConsumeRequest) -> InventoryPayload:
+async def consume_inventory(
+    body: ConsumeRequest,
+    background_tasks: BackgroundTasks,
+) -> InventoryPayload:
     """
     Natural-language consumption event → structured inventory debit.
 
@@ -397,16 +419,12 @@ async def consume_inventory(body: ConsumeRequest) -> InventoryPayload:
 
     Args:
         body: Validated :class:`ConsumeRequest` with the ``statement`` field.
+        background_tasks: FastAPI BackgroundTasks system.
 
     Returns:
         The updated :class:`~app.models.InventoryPayload` as now persisted on disk.
         If the item mentioned is not found in inventory, the unchanged payload
         is returned (the function logs a warning but does not raise).
-
-    Raises:
-        HTTP 422: If ``statement`` is empty or whitespace-only.
-        HTTP 502: If the Gemini API call or disk write fails.
-        HTTP 500: If the LLM response fails schema validation.
     """
     logger.info("POST /inventory/consume | statement=%r", body.statement)
 
@@ -418,7 +436,13 @@ async def consume_inventory(body: ConsumeRequest) -> InventoryPayload:
         "POST /inventory/consume complete | total_inventory_items=%d",
         len(updated_inventory.items),
     )
+
+    # Trigger recipe precomputation in the background
+    background_tasks.add_task(precompute_and_cache_recipes)
+    logger.info("POST /inventory/consume | scheduled background recipe precomputation")
+
     return updated_inventory
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -456,9 +480,12 @@ async def get_recipe_recommendations() -> RecipeListResponse:
         HTTP 502: If the Gemini API call fails after exhausting retries.
         HTTP 500: If the LLM response fails Recipe schema validation.
     """
-    logger.info("GET /recipes/recommend | fetching recipe recommendations.")
+    logger.info("GET /recipes/recommend | fetching cached recipe recommendations.")
 
-    recipes = await recommend_optimized_meals()
+    recipes = await read_cached_recipes()
+    if not recipes:
+        logger.info("GET /recipes/recommend | Cache empty/missing, performing live fallback generation.")
+        recipes = await recommend_optimized_meals()
 
     logger.info(
         "GET /recipes/recommend complete | recipe_count=%d",
@@ -469,8 +496,36 @@ async def get_recipe_recommendations() -> RecipeListResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Route 4 — DELETE /inventory/item/{item_name}
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.delete(
+    "/inventory/item/{item_name}",
+    response_model=InventoryPayload,
+    status_code=status.HTTP_200_OK,
+    summary="Remove an item from inventory",
+    description="Removes all batches of the specified item name from the inventory.",
+    tags=["Inventory"],
+)
+async def remove_item(
+    item_name: str,
+    background_tasks: BackgroundTasks,
+) -> InventoryPayload:
+    """
+    Remove all batches of an item from the fridge by its exact name.
+    
+    Triggers recipe precomputation in the background after successful deletion.
+    """
+    logger.info("DELETE /inventory/item/%s | removing item.", item_name)
+    updated_inventory = await remove_inventory_item(item_name)
+    background_tasks.add_task(precompute_and_cache_recipes)
+    return updated_inventory
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health Check
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @app.get(
     "/health",
