@@ -33,6 +33,12 @@ export const api = {
     const res = await fetch(`${API_BASE}/recipes/recommend`);
     if (!res.ok) throw new Error("Failed to get recipes");
     return res.json();
+  },
+  
+  getInventory: async () => {
+    const res = await fetch(`${API_BASE}/inventory`);
+    if (!res.ok) throw new Error("Failed to get inventory");
+    return res.json();
   }
 };
 

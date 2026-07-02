@@ -1,10 +1,36 @@
 import React, { useState } from 'react';
-import { Package, Utensils, AlertTriangle, Send, Trash2 } from 'lucide-react';
+import { Send, Trash2, Plus } from 'lucide-react';
 import { api } from '../api';
+import { ReceiptUploader } from './ReceiptUploader';
+
+const getIconForProduct = (name: string) => {
+  const lower = name.toLowerCase();
+  if (lower.includes('apple')) return '🍎';
+  if (lower.includes('orange')) return '🍊';
+  if (lower.includes('egg')) return '🥚';
+  if (lower.includes('milk')) return '🥛';
+  if (lower.includes('bread')) return '🍞';
+  if (lower.includes('butter')) return '🧈';
+  if (lower.includes('chicken')) return '🍗';
+  if (lower.includes('tomato')) return '🍅';
+  if (lower.includes('garlic')) return '🧄';
+  if (lower.includes('flour')) return '🌾';
+  if (lower.includes('potato')) return '🥔';
+  if (lower.includes('onion')) return '🧅';
+  if (lower.includes('cheese')) return '🧀';
+  if (lower.includes('beef') || lower.includes('meat')) return '🥩';
+  if (lower.includes('fish')) return '🐟';
+  if (lower.includes('rice')) return '🍚';
+  if (lower.includes('water')) return '💧';
+  if (lower.includes('oil')) return '🍾';
+  return '📦'; // Default
+};
 
 export function InventoryDashboard({ inventory, onInventoryUpdate }: { inventory: any, onInventoryUpdate: (data: any) => void }) {
   const [statement, setStatement] = useState('');
   const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+  const [showAdd, setShowAdd] = useState(false);
 
   const handleConsume = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,7 +49,7 @@ export function InventoryDashboard({ inventory, onInventoryUpdate }: { inventory
   };
 
   const handleRemove = async (itemName: string) => {
-    if (!window.confirm(`Are you sure you want to remove "${itemName}" from your fridge?`)) return;
+    if (!window.confirm(`Are you sure you want to completely throw away "${itemName}"?`)) return;
     setLoading(true);
     try {
       const data = await api.removeItem(itemName);
@@ -36,98 +62,110 @@ export function InventoryDashboard({ inventory, onInventoryUpdate }: { inventory
   };
 
   const items = inventory?.items || [];
+  const filteredItems = items.filter((item: any) => 
+    item.item_name.toLowerCase().includes(search.toLowerCase())
+  );
 
-  
-  // Calculate days until expiration to determine badge color
-  const getExpirationBadge = (dateString: string) => {
+  const getExpirationClass = (dateString: string) => {
     const exp = new Date(dateString);
     const now = new Date();
     const days = Math.ceil((exp.getTime() - now.getTime()) / (1000 * 3600 * 24));
     
-    if (days < 0) return <span className="badge badge-danger">Expired</span>;
-    if (days <= 3) return <span className="badge badge-danger">Expiring Soon ({days}d)</span>;
-    if (days <= 7) return <span className="badge badge-warning">Expires in {days}d</span>;
-    return <span className="badge badge-success">Good ({days}d left)</span>;
+    if (days < 0) return 'danger';
+    if (days <= 3) return 'danger';
+    if (days <= 7) return 'warning';
+    return 'success';
   };
 
   return (
-    <div className="glass-panel animate-fade-in" style={{ animationDelay: '0.1s' }}>
-      <h2><Package size={24} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 8 }}/> Fridge Inventory</h2>
+    <div className="animate-fade-in">
       
-      {/* Consumption Input */}
-      <form onSubmit={handleConsume} style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
+      {/* Quick Actions */}
+      <div style={{ display: 'flex', gap: '16px', marginBottom: '32px' }}>
         <input
           type="text"
-          className="input-glass"
-          placeholder="e.g. I drank 1 cup of milk"
-          value={statement}
-          onChange={(e) => setStatement(e.target.value)}
-          disabled={loading}
+          className="input-field"
+          placeholder="🔍 Search fridge..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ flex: 1 }}
         />
-        <button type="submit" className="btn-primary" disabled={loading || !statement.trim()}>
-          <Send size={18} />
+        <button 
+          className="btn-primary" 
+          style={{ width: 'auto' }}
+          onClick={() => setShowAdd(!showAdd)}
+        >
+          {showAdd ? 'Close' : <><Plus size={20} /> Add Items</>}
         </button>
-      </form>
+      </div>
 
-      {/* Inventory List */}
+      {showAdd && (
+        <div style={{ marginBottom: '40px', padding: '24px', background: 'var(--card-bg)', borderRadius: '20px', border: '1px solid var(--card-border)', boxShadow: 'var(--card-shadow)' }}>
+          <ReceiptUploader onUploadComplete={(data) => {
+            onInventoryUpdate(data);
+            setShowAdd(false);
+          }} />
+        </div>
+      )}
+
+      {/* Consumption Logging */}
+      <div style={{ marginBottom: '40px', padding: '24px', background: '#f8fafc', borderRadius: '20px', border: '1px solid var(--card-border)' }}>
+        <div className="panel-title" style={{ fontSize: '1.2rem', marginBottom: '12px' }}>Did you eat something?</div>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '16px', fontSize: '0.9rem' }}>
+          Tell the AI what you used (e.g. "I drank half the milk" or "used 2 eggs").
+        </p>
+        <form onSubmit={handleConsume} style={{ display: 'flex', gap: '12px' }}>
+          <input
+            type="text"
+            className="input-field"
+            placeholder="Log your consumption..."
+            value={statement}
+            onChange={(e) => setStatement(e.target.value)}
+            disabled={loading}
+            style={{ background: '#fff' }}
+          />
+          <button type="submit" className="btn-primary" style={{ width: 'auto' }} disabled={loading || !statement.trim()}>
+            <Send size={20} />
+          </button>
+        </form>
+      </div>
+
+      <div className="panel-title">Your Current Ingredients</div>
+      
       {items.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
-          <Utensils size={48} style={{ opacity: 0.2, marginBottom: '16px' }} />
+        <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-tertiary)' }}>
+          <div style={{ fontSize: '3rem', marginBottom: '16px' }}>🛒</div>
           <p>Your fridge is completely empty!</p>
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          {items.map((item: any, idx: number) => (
-            <div 
-              key={idx} 
-              style={{ 
-                display: 'flex', 
-                justifyContent: 'space-between', 
-                alignItems: 'center',
-                padding: '16px',
-                background: 'rgba(255,255,255,0.05)',
-                borderRadius: '8px',
-                borderLeft: item.count <= 0 ? '4px solid var(--danger)' : '4px solid var(--accent-primary)'
-              }}
-            >
-              <div>
-                <h4 style={{ margin: 0, textTransform: 'capitalize' }}>{item.item_name}</h4>
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                  {item.count <= 0 ? (
-                    <span className="text-danger" style={{ fontWeight: 'bold' }}>Out of stock</span>
-                  ) : (
-                    <>{item.count} {item.unit}</>
-                  )}
-                </div>
+        <div className="product-grid">
+          {filteredItems.map((item: any, idx: number) => (
+            <div key={idx} className="product-card">
+              <button 
+                className="product-delete" 
+                onClick={() => handleRemove(item.item_name)}
+                disabled={loading}
+                title="Throw away completely"
+              >
+                <Trash2 size={16} />
+              </button>
+              
+              <div className={`product-badge ${getExpirationClass(item.expiration_date)}`}></div>
+              
+              <div className="product-icon">
+                {getIconForProduct(item.item_name)}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <div style={{ textAlign: 'right' }}>
-                  {item.count > 0 && getExpirationBadge(item.expiration_date)}
-                </div>
-                <button 
-                  onClick={() => handleRemove(item.item_name)} 
-                  disabled={loading}
-                  style={{
-                    background: 'transparent',
-                    border: 'none',
-                    color: 'var(--danger, #ef4444)',
-                    cursor: 'pointer',
-                    padding: '8px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    borderRadius: '4px',
-                    transition: 'background 0.2s'
-                  }}
-                  title="Remove item"
-                  onMouseOver={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'}
-                  onMouseOut={(e) => e.currentTarget.style.background = 'transparent'}
-                >
-                  <Trash2 size={16} />
-                </button>
+              <div className="product-name" title={item.item_name}>
+                {item.item_name}
+              </div>
+              <div className="product-qty">
+                {item.count <= 0 ? (
+                  <span className="text-danger">Out of stock</span>
+                ) : (
+                  <>{item.count} {item.unit}</>
+                )}
               </div>
             </div>
-
           ))}
         </div>
       )}

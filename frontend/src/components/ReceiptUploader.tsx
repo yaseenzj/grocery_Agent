@@ -27,28 +27,29 @@ export function ReceiptUploader({ onUploadComplete }: { onUploadComplete: (data:
   };
 
   return (
-    <div className="glass-panel animate-fade-in">
-      <h2><Upload size={24} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 8 }}/> Add Groceries</h2>
-      <p className="text-secondary" style={{ marginBottom: '16px' }}>
-        Paste a grocery receipt, or just type items in any format. Our AI handles the rest.
+    <div className="animate-fade-in">
+      <div className="panel-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Upload size={20} /> Paste a Receipt or List
+      </div>
+      <p className="text-secondary" style={{ marginBottom: '24px', fontSize: '0.9rem' }}>
+        Type items in any format. Our AI handles the rest.
       </p>
       
       <form onSubmit={handleSubmit}>
         <textarea
-          className="input-glass"
+          className="input-field"
           rows={6}
-          placeholder={`Any format works, e.g.:\n• 1 litre milk, 10 tomatoes, 10 potatoes\n• Chicken Breast 2 lbs\n  Whole Milk 1 gallon\n• Bought 2 cartons of eggs and some spinach`}
+          placeholder={`Any format works, e.g.:\n• 1 litre milk, 10 tomatoes\n• Chicken Breast 2 lbs\n• Bought 2 cartons of eggs`}
           value={text}
           onChange={(e) => setText(e.target.value)}
           disabled={loading}
-          style={{ marginBottom: '16px', resize: 'vertical' }}
+          style={{ marginBottom: '24px', resize: 'vertical' }}
         />
         
         <button 
           type="submit" 
           className="btn-primary" 
           disabled={loading || !text.trim()}
-          style={{ width: '100%' }}
         >
           {loading ? (
             <><Loader2 className="animate-spin" /> Processing AI...</>

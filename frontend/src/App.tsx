@@ -1,36 +1,45 @@
-import React, { useState, useEffect } from 'react';
-import { ReceiptUploader } from './components/ReceiptUploader';
+import { useState, useEffect } from 'react';
 import { InventoryDashboard } from './components/InventoryDashboard';
 import { RecipeAdvisor } from './components/RecipeAdvisor';
+import { api } from './api';
 
 function App() {
   const [inventory, setInventory] = useState<any>({ items: [] });
+  const [activeTab, setActiveTab] = useState<'fridge' | 'recipes'>('fridge');
 
-  // Initial load would typically fetch from a GET /inventory endpoint.
-  // Since we don't have one in this API, the inventory will populate 
-  // either when we upload a receipt or consume an item.
+  useEffect(() => {
+    api.getInventory().then(setInventory).catch(console.error);
+  }, []);
   
   return (
-    <div className="container">
-      <div style={{ textAlign: 'center', marginBottom: '48px' }} className="animate-fade-in">
-        <h1 style={{ fontSize: '3rem', margin: '0 0 16px 0', background: 'linear-gradient(to right, var(--accent-primary), #d946ef)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-          Grocery Agent
-        </h1>
-        <p className="text-secondary" style={{ fontSize: '1.2rem', maxWidth: '600px', margin: '0 auto' }}>
-          Your AI-powered sous chef. Upload receipts, track your fridge, and generate recipes before food goes bad.
-        </p>
-      </div>
+    <div className="app-wrapper">
+      <header className="app-header">
+        <h1>{activeTab === 'fridge' ? 'Smart Fridge' : 'Recipes'}</h1>
+        <div className="tabs">
+          <button 
+            className={`tab ${activeTab === 'fridge' ? 'active' : ''}`}
+            onClick={() => setActiveTab('fridge')}
+          >
+            My Fridge
+          </button>
+          <button 
+            className={`tab ${activeTab === 'recipes' ? 'active' : ''}`}
+            onClick={() => setActiveTab('recipes')}
+          >
+            Recipe Advisor
+          </button>
+        </div>
+      </header>
 
-      <div className="grid-layout">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
-          <ReceiptUploader onUploadComplete={(data) => setInventory(data)} />
+      <main className="panel">
+        {activeTab === 'fridge' && (
           <InventoryDashboard inventory={inventory} onInventoryUpdate={(data) => setInventory(data)} />
-        </div>
+        )}
         
-        <div>
+        {activeTab === 'recipes' && (
           <RecipeAdvisor />
-        </div>
-      </div>
+        )}
+      </main>
     </div>
   );
 }
